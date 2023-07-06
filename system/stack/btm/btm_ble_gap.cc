@@ -1180,6 +1180,10 @@ void btm_ble_periodic_adv_sync_lost(uint16_t sync_handle) {
   LOG_DEBUG("[PSync]: sync_handle = %d", sync_handle);
 
   int index = btm_ble_get_psync_index_from_handle(sync_handle);
+  if (index == MAX_SYNC_TRANSACTION) {
+    LOG_ERROR("[PSync]: index not found for handle %u", sync_handle);
+    return;
+  }
   tBTM_BLE_PERIODIC_SYNC* ps = &btm_ble_pa_sync_cb.p_sync[index];
   ps->sync_lost_cb.Run(sync_handle);
 
@@ -2438,12 +2442,11 @@ void btm_ble_update_inq_result(tINQ_DB_ENT* p_i, uint8_t addr_type,
     }
 
     const uint8_t* p_service_data = data.data();
-    uint16_t remaining_data_len = data.size();
     uint8_t service_data_len = 0;
 
     while ((p_service_data = AdvertiseDataParser::GetFieldByType(
                 p_service_data + service_data_len,
-                (remaining_data_len -= service_data_len),
+                data.size() - (p_service_data - data.data()) - service_data_len,
                 BTM_BLE_AD_TYPE_SERVICE_DATA_TYPE, &service_data_len))) {
       uint16_t uuid;
       const uint8_t* p_uuid = p_service_data;

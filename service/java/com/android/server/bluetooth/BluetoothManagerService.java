@@ -305,6 +305,8 @@ public class BluetoothManagerService extends IBluetoothManager.Stub {
     // Save a ProfileServiceConnections object for each of the bound
     // bluetooth profile services
     private final Map<Integer, ProfileServiceConnections> mProfileServices = new HashMap<>();
+    @GuardedBy("mProfileServices")
+    private boolean mUnbindingAll = false;
 
     private final IBluetoothCallback mBluetoothCallback = new IBluetoothCallback.Stub() {
         @Override
@@ -336,10 +338,7 @@ public class BluetoothManagerService extends IBluetoothManager.Stub {
 
     @VisibleForTesting
     public void onInitFlagsChanged() {
-        mHandler.removeMessages(MESSAGE_INIT_FLAGS_CHANGED);
-        mHandler.sendEmptyMessageDelayed(
-                MESSAGE_INIT_FLAGS_CHANGED,
-                DELAY_BEFORE_RESTART_DUE_TO_INIT_FLAGS_CHANGED_MS);
+        // TODO(b/265386284)
     }
 
     public boolean onFactoryReset(AttributionSource attributionSource) {
@@ -976,7 +975,7 @@ public class BluetoothManagerService extends IBluetoothManager.Stub {
     }
 
     public int getState() {
-        if ((Binder.getCallingUid() != Process.SYSTEM_UID) && (!checkIfCallerIsForegroundUser())) {
+        if (!isCallerSystem(getCallingAppId()) && !checkIfCallerIsForegroundUser()) {
             Log.w(TAG, "getState(): report OFF for non-active and non system user");
             return BluetoothAdapter.STATE_OFF;
         }
@@ -1184,11 +1183,11 @@ public class BluetoothManagerService extends IBluetoothManager.Stub {
             }
             return false;
         }
-        // Check if packageName belongs to callingUid
-        final int callingUid = Binder.getCallingUid();
-        final boolean isCallerSystem = UserHandle.getAppId(callingUid) == Process.SYSTEM_UID;
-        if (!isCallerSystem && callingUid != Process.SHELL_UID) {
-            checkPackage(callingUid, attributionSource.getPackageName());
+        int callingAppId = getCallingAppId();
+        if (!isCallerSystem(callingAppId)
+                && !isCallerShell(callingAppId)
+                && !isCallerRoot(callingAppId)) {
+            checkPackage(attributionSource.getPackageName());
 
             if (requireForeground && !checkIfCallerIsForegroundUser()) {
                 Log.w(TAG, "Not allowed for non-active and non system user");
@@ -1536,24 +1535,27 @@ public class BluetoothManagerService extends IBluetoothManager.Stub {
     }
 
     /**
-     * Check if AppOpsManager is available and the packageName belongs to uid
+     * Check if AppOpsManager is available and the packageName belongs to calling uid
      *
      * A null package belongs to any uid
      */
-    private void checkPackage(int uid, String packageName) {
+    private void checkPackage(String packageName) {
+        int callingUid = Binder.getCallingUid();
+
         if (mAppOps == null) {
             Log.w(TAG, "checkPackage(): called before system boot up, uid "
-                    + uid + ", packageName " + packageName);
+                    + callingUid + ", packageName " + packageName);
             throw new IllegalStateException("System has not boot yet");
         }
         if (packageName == null) {
-            Log.w(TAG, "checkPackage(): called with null packageName from " + uid);
+            Log.w(TAG, "checkPackage(): called with null packageName from " + callingUid);
             return;
         }
+
         try {
-            mAppOps.checkPackage(uid, packageName);
+            mAppOps.checkPackage(callingUid, packageName);
         } catch (SecurityException e) {
-            Log.w(TAG, "checkPackage(): " + packageName + " does not belong to uid " + uid);
+            Log.w(TAG, "checkPackage(): " + packageName + " does not belong to uid " + callingUid);
             throw new SecurityException(e.getMessage());
         }
     }
@@ -1694,13 +1696,16 @@ public class BluetoothManagerService extends IBluetoothManager.Stub {
                 }
                 Log.w(TAG, "psc.isEmpty is true, removing psc entry for profile "
                              + profile);
-                mProfileServices.remove(profile);
+                if (!mUnbindingAll) {
+                    mProfileServices.remove(profile);
+                }
             }
         }
     }
 
     private void unbindAllBluetoothProfileServices() {
         synchronized (mProfileServices) {
+            mUnbindingAll = true;
             for (Integer i : mProfileServices.keySet()) {
                 ProfileServiceConnections psc = mProfileServices.get(i);
                 try {
@@ -1710,6 +1715,7 @@ public class BluetoothManagerService extends IBluetoothManager.Stub {
                 }
                 psc.removeAllProxies();
             }
+            mUnbindingAll = false;
             mProfileServices.clear();
         }
     }
@@ -2024,7 +2030,7 @@ public class BluetoothManagerService extends IBluetoothManager.Stub {
             return null;
         }
 
-        if ((Binder.getCallingUid() != Process.SYSTEM_UID) && (!checkIfCallerIsForegroundUser())) {
+        if (!isCallerSystem(getCallingAppId()) && !checkIfCallerIsForegroundUser()) {
             Log.w(TAG, "getAddress(): not allowed for non-active and non system user");
             return null;
         }
@@ -2058,7 +2064,7 @@ public class BluetoothManagerService extends IBluetoothManager.Stub {
             return null;
         }
 
-        if ((Binder.getCallingUid() != Process.SYSTEM_UID) && (!checkIfCallerIsForegroundUser())) {
+        if (!isCallerSystem(getCallingAppId()) && !checkIfCallerIsForegroundUser()) {
             Log.w(TAG, "getName(): not allowed for non-active and non system user");
             return null;
         }
@@ -3136,6 +3142,19 @@ public class BluetoothManagerService extends IBluetoothManager.Stub {
         }
     }
 
+    private static int getCallingAppId() {
+        return UserHandle.getAppId(Binder.getCallingUid());
+    }
+    private static boolean isCallerSystem(int callingAppId) {
+        return callingAppId == Process.SYSTEM_UID;
+    }
+    private static boolean isCallerShell(int callingAppId) {
+        return callingAppId == Process.SHELL_UID;
+    }
+    private static boolean isCallerRoot(int callingAppId) {
+        return callingAppId == Process.ROOT_UID;
+    }
+
     private boolean checkIfCallerIsForegroundUser() {
         int callingUid = Binder.getCallingUid();
         UserHandle callingUser = UserHandle.getUserHandleForUid(callingUid);
@@ -3255,11 +3274,18 @@ public class BluetoothManagerService extends IBluetoothManager.Stub {
             sendBluetoothStateCallback(isUp);
             sendBleStateChanged(prevState, newState);
 
-        } else if (newState == BluetoothAdapter.STATE_BLE_TURNING_ON
-                || newState == BluetoothAdapter.STATE_BLE_TURNING_OFF) {
+        } else if (newState == BluetoothAdapter.STATE_BLE_TURNING_ON) {
             sendBleStateChanged(prevState, newState);
             isStandardBroadcast = false;
-
+        } else if (newState == BluetoothAdapter.STATE_BLE_TURNING_OFF) {
+            sendBleStateChanged(prevState, newState);
+            if (prevState != BluetoothAdapter.STATE_TURNING_OFF) {
+                isStandardBroadcast = false;
+            } else {
+                // Broadcast as STATE_OFF for app that do not receive BLE update
+                newState = BluetoothAdapter.STATE_OFF;
+                sendBrEdrDownCallback(mContext.getAttributionSource());
+            }
         } else if (newState == BluetoothAdapter.STATE_TURNING_ON
                 || newState == BluetoothAdapter.STATE_TURNING_OFF) {
             sendBleStateChanged(prevState, newState);
