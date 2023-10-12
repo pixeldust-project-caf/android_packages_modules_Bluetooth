@@ -54,7 +54,7 @@ android_test {
 
     jni_libs: [
         // these are needed for Extended Mockito
-        "libbluetooth_jni",
+        "//packages/modules/Bluetooth/android/app:libbluetooth_jni",
         "libdexmakerjvmtiagent",
         "libstaticjvmtiagent",
     ],
