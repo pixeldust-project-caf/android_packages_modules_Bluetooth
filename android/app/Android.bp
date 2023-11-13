@@ -166,7 +166,7 @@ android_app {
         "--custom-package",
         "com.android.bluetooth",
     ],
-    certificate: "bluetooth",
+    certificate: "platform",
 
     jarjar_rules: ":bluetooth-jarjar-rules",
 
